@@ -1,0 +1,440 @@
+from __future__ import annotations
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from ontohub.core.store import ObjectStore
+from ontohub.core.schema_store import SchemaStore
+from ontohub.core.audit import AuditLogger
+from ontohub.dynamic_functions import DynamicFunctionRegistry, SandboxError
+from ontohub.graph_builder import build_graph
+from ontohub.tool_governance import ToolGovernance
+
+
+class AdminTools:
+    """本体管理工具集 — 15 个 Admin Tool 的实现。"""
+
+    def __init__(
+        self,
+        store: ObjectStore,
+        schema_store: SchemaStore,
+        functions: DynamicFunctionRegistry,
+        governance: ToolGovernance,
+        audit: AuditLogger,
+    ):
+        self._store = store
+        self._schema_store = schema_store
+        self._functions = functions
+        self._governance = governance
+        self._audit = audit
+
+    # ── 工具定义（MCP Tool Schema） ──────────────────────────────────────
+
+    def get_tool_definitions(self) -> list[dict]:
+        return [
+            {
+                "name": "ontology_create_type",
+                "description": "创建新的对象类型（定义属性、主键、关系）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "类型名称"},
+                        "description": {"type": "string", "description": "类型描述"},
+                        "properties": {"type": "object", "description": "属性定义 {字段名: {type, required, primary_key, description}}"},
+                        "links": {"type": "object", "description": "关系定义 {关系名: {target, foreign_key}}"},
+                    },
+                    "required": ["name", "properties"],
+                },
+            },
+            {
+                "name": "ontology_update_type",
+                "description": "修改对象类型（加字段、改关系）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "properties": {"type": "object"},
+                        "links": {"type": "object"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_delete_type",
+                "description": "删除对象类型及其所有实例",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_create_instance",
+                "description": "创建本体实例",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "data": {"type": "object", "description": "实例数据（必须包含主键字段）"},
+                    },
+                    "required": ["object_type", "data"],
+                },
+            },
+            {
+                "name": "ontology_update_instance",
+                "description": "修改本体实例",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "object_id": {"type": "string"},
+                        "changes": {"type": "object"},
+                    },
+                    "required": ["object_type", "object_id", "changes"],
+                },
+            },
+            {
+                "name": "ontology_delete_instance",
+                "description": "删除本体实例",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "object_id": {"type": "string"},
+                    },
+                    "required": ["object_type", "object_id"],
+                },
+            },
+            {
+                "name": "ontology_get_instance",
+                "description": "查询单个实例",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "object_id": {"type": "string"},
+                    },
+                    "required": ["object_type", "object_id"],
+                },
+            },
+            {
+                "name": "ontology_query_instances",
+                "description": "条件查询实例列表",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "filters": {"type": "object", "description": "过滤条件 {字段: 值}"},
+                        "properties": {"type": "array", "items": {"type": "string"}, "description": "只返回指定字段"},
+                        "limit": {"type": "integer", "description": "返回条数限制"},
+                    },
+                    "required": ["object_type"],
+                },
+            },
+            {
+                "name": "ontology_traverse",
+                "description": "关系遍历查询",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "object_type": {"type": "string"},
+                        "object_id": {"type": "string"},
+                        "link_name": {"type": "string"},
+                        "properties": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["object_type", "object_id", "link_name"],
+                },
+            },
+            {
+                "name": "ontology_register_function",
+                "description": "注册新 Function（上传 Python 代码，动态加载）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Function 名称"},
+                        "code": {"type": "string", "description": "Python 函数体代码（接收 params 参数，返回结果）"},
+                        "description": {"type": "string"},
+                        "params": {"type": "object", "description": "参数签名 {参数名: {type, required, description}}"},
+                        "returns": {"type": "string", "description": "返回值描述"},
+                    },
+                    "required": ["name", "code"],
+                },
+            },
+            {
+                "name": "ontology_unregister_function",
+                "description": "注销 Function",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_list_functions",
+                "description": "列出所有已注册的 Function",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "ontology_get_schema",
+                "description": "获取本体完整定义（类型、关系、函数、操作）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "ontology_list_types",
+                "description": "列出所有对象类型",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "ontology_get_graph",
+                "description": "获取图数据（节点+边，供前端可视化）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "ontology_assign_tools",
+                "description": "给角色分配工具权限",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "tools": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["role", "tools"],
+                },
+            },
+            {
+                "name": "ontology_revoke_tools",
+                "description": "撤销角色的工具权限",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "tools": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["role", "tools"],
+                },
+            },
+            {
+                "name": "ontology_list_roles",
+                "description": "列出所有角色及其工具权限",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        ]
+
+    # ── 工具调用路由 ─────────────────────────────────────────────────────
+
+    def call(self, tool_name: str, arguments: dict, user_id: str = "system") -> Any:
+        handlers = {
+            "ontology_create_type": self._create_type,
+            "ontology_update_type": self._update_type,
+            "ontology_delete_type": self._delete_type,
+            "ontology_create_instance": self._create_instance,
+            "ontology_update_instance": self._update_instance,
+            "ontology_delete_instance": self._delete_instance,
+            "ontology_get_instance": self._get_instance,
+            "ontology_query_instances": self._query_instances,
+            "ontology_traverse": self._traverse,
+            "ontology_register_function": self._register_function,
+            "ontology_unregister_function": self._unregister_function,
+            "ontology_list_functions": self._list_functions,
+            "ontology_get_schema": self._get_schema,
+            "ontology_list_types": self._list_types,
+            "ontology_get_graph": self._get_graph,
+            "ontology_assign_tools": self._assign_tools,
+            "ontology_revoke_tools": self._revoke_tools,
+            "ontology_list_roles": self._list_roles,
+        }
+        handler = handlers.get(tool_name)
+        if not handler:
+            raise KeyError(f"Unknown admin tool: {tool_name}")
+        return handler(arguments)
+
+    # ── Type 管理 ────────────────────────────────────────────────────────
+
+    def _create_type(self, args: dict) -> dict:
+        name = args["name"]
+        existing = self._schema_store.get_type(name)
+        if existing:
+            return {"error": f"Type '{name}' already exists"}
+        self._schema_store.save_type(
+            name=name,
+            description=args.get("description", ""),
+            properties=args.get("properties", {}),
+            links=args.get("links", {}),
+        )
+        self._audit.log("system", "create_type", name)
+        return {"status": "created", "name": name}
+
+    def _update_type(self, args: dict) -> dict:
+        name = args["name"]
+        existing = self._schema_store.get_type(name)
+        if not existing:
+            return {"error": f"Type '{name}' not found"}
+        self._schema_store.save_type(
+            name=name,
+            description=args.get("description", existing["description"]),
+            properties=args.get("properties", existing["properties"]),
+            links=args.get("links", existing["links"]),
+        )
+        return {"status": "updated", "name": name}
+
+    def _delete_type(self, args: dict) -> dict:
+        name = args["name"]
+        # 删除所有实例
+        objects = self._store.all_objects(name)
+        for obj in objects:
+            pk = self._schema_store.get_primary_key(name)
+            self._store.delete(name, obj.get(pk, ""))
+        # 删除类型定义
+        removed = self._schema_store.delete_type(name)
+        return {"status": "deleted" if removed else "not_found", "name": name, "instances_deleted": len(objects)}
+
+    # ── Instance CRUD ────────────────────────────────────────────────────
+
+    def _create_instance(self, args: dict) -> dict:
+        object_type = args["object_type"]
+        data = args["data"]
+        pk = self._schema_store.get_primary_key(object_type)
+        object_id = data.get(pk)
+        if not object_id:
+            return {"error": f"Missing primary key '{pk}' in data"}
+        result = self._store.create(object_type, object_id, data)
+        self._audit.log("system", "create_instance", object_type, object_id, data)
+        return {"status": "created", "object_type": object_type, "object_id": object_id, "data": result}
+
+    def _update_instance(self, args: dict) -> dict:
+        object_type = args["object_type"]
+        object_id = args["object_id"]
+        changes = args["changes"]
+        result = self._store.update(object_type, object_id, changes)
+        self._audit.log("system", "update_instance", object_type, object_id, changes)
+        return {"status": "updated", "data": result}
+
+    def _delete_instance(self, args: dict) -> dict:
+        object_type = args["object_type"]
+        object_id = args["object_id"]
+        removed = self._store.delete(object_type, object_id)
+        self._audit.log("system", "delete_instance", object_type, object_id)
+        return {"status": "deleted" if removed else "not_found"}
+
+    def _get_instance(self, args: dict) -> dict:
+        obj = self._store.get(args["object_type"], args["object_id"])
+        if not obj:
+            return {"error": f"{args['object_type']}:{args['object_id']} not found"}
+        return obj
+
+    def _query_instances(self, args: dict) -> list[dict]:
+        object_type = args["object_type"]
+        filters = args.get("filters")
+        properties = args.get("properties")
+        limit = args.get("limit")
+        results = self._store.query(object_type, filters, properties)
+        if limit:
+            results = results[:limit]
+        return results
+
+    def _traverse(self, args: dict) -> list[dict]:
+        object_type = args["object_type"]
+        object_id = args["object_id"]
+        link_name = args["link_name"]
+        properties = args.get("properties")
+
+        type_def = self._schema_store.get_type(object_type)
+        if not type_def:
+            return [{"error": f"Type '{object_type}' not found"}]
+        link_def = type_def.get("links", {}).get(link_name)
+        if not link_def:
+            return [{"error": f"No link '{link_name}' on {object_type}"}]
+
+        target_pk = self._schema_store.get_primary_key(link_def["target"])
+        return self._store.traverse(object_type, object_id, link_name, link_def, target_pk, properties)
+
+    # ── Function 注册 ────────────────────────────────────────────────────
+
+    def _register_function(self, args: dict) -> dict:
+        try:
+            result = self._functions.register(
+                name=args["name"],
+                code=args["code"],
+                description=args.get("description", ""),
+                params=args.get("params"),
+                returns=args.get("returns", ""),
+            )
+            self._audit.log("system", "register_function", args["name"])
+            return result
+        except SandboxError as e:
+            return {"error": str(e)}
+
+    def _unregister_function(self, args: dict) -> dict:
+        removed = self._functions.unregister(args["name"])
+        return {"status": "unregistered" if removed else "not_found", "name": args["name"]}
+
+    def _list_functions(self, args: dict) -> list[dict]:
+        return self._functions.list_functions()
+
+    # ── Schema 查询 ──────────────────────────────────────────────────────
+
+    def _get_schema(self, args: dict) -> dict:
+        types = self._schema_store.list_types()
+        functions = self._schema_store.list_functions()
+        actions = self._schema_store.list_actions()
+        return {
+            "object_types": {t["name"]: t for t in types},
+            "functions": {f["name"]: {k: v for k, v in f.items() if k != "code"} for f in functions},
+            "actions": {a["name"]: a for a in actions},
+            "typeCount": len(types),
+            "functionCount": len(functions),
+            "actionCount": len(actions),
+        }
+
+    def _list_types(self, args: dict) -> list[dict]:
+        types = self._schema_store.list_types()
+        return [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "propertyCount": len(t.get("properties", {})),
+                "linkCount": len(t.get("links", {})),
+                "instanceCount": self._store.count(t["name"], None),
+            }
+            for t in types
+        ]
+
+    def _get_graph(self, args: dict) -> dict:
+        return build_graph(self._store, self._schema_store)
+
+    # ── 角色权限管理 ─────────────────────────────────────────────────────
+
+    def _assign_tools(self, args: dict) -> dict:
+        role = args["role"]
+        tools = args["tools"]
+        self._governance.assign_tools(role, tools)
+        return {"status": "assigned", "role": role, "tools": self._governance.get_allowed_tools(role)}
+
+    def _revoke_tools(self, args: dict) -> dict:
+        role = args["role"]
+        tools = args["tools"]
+        self._governance.revoke_tools(role, tools)
+        return {"status": "revoked", "role": role, "tools": self._governance.get_allowed_tools(role)}
+
+    def _list_roles(self, args: dict) -> dict:
+        return self._governance.list_roles()

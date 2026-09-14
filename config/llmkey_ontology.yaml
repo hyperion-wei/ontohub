@@ -1,0 +1,544 @@
+# LLM API Key 管理本体 — Key、模型、Provider、BaseURL、监控、分组、模板
+object_types:
+
+  Provider:
+    description: LLM 服务提供商（OpenAI、DeepSeek、Anthropic 等）
+    properties:
+      providerId:
+        type: string
+        required: true
+        description: 提供商唯一标识
+        primary_key: true
+      name:
+        type: string
+        required: true
+        description: 提供商名称
+      website:
+        type: string
+        required: false
+        description: 官网地址
+      status:
+        type: enum
+        values: [active, deprecated, maintenance]
+        required: false
+        description: 提供商状态
+
+  BaseURL:
+    description: API 接入地址（官方端点、代理、中转等）
+    properties:
+      baseUrlId:
+        type: string
+        required: true
+        description: Base URL 唯一标识
+        primary_key: true
+      url:
+        type: string
+        required: true
+        description: 完整的 API 地址
+      providerId:
+        type: string
+        required: true
+        description: 所属提供商
+      region:
+        type: string
+        required: false
+        description: 区域（官方/国内中转/海外代理等）
+      isOfficial:
+        type: bool
+        required: false
+        description: 是否官方端点
+      latency:
+        type: int
+        required: false
+        description: 平均延迟（毫秒）
+      status:
+        type: enum
+        values: [active, down, unstable]
+        required: false
+        description: 可用状态
+    links:
+      belongsTo: { target: Provider, foreign_key: providerId }
+
+  Model:
+    description: LLM 模型
+    properties:
+      modelId:
+        type: string
+        required: true
+        description: 模型唯一标识
+        primary_key: true
+      name:
+        type: string
+        required: true
+        description: 模型名称（如 gpt-4o, deepseek-chat）
+      providerId:
+        type: string
+        required: true
+        description: 所属提供商
+      contextWindow:
+        type: int
+        required: false
+        description: 上下文窗口大小（tokens）
+      maxOutput:
+        type: int
+        required: false
+        description: 最大输出 tokens
+      inputPrice:
+        type: float
+        required: false
+        description: 输入价格（美元/百万 tokens）
+      outputPrice:
+        type: float
+        required: false
+        description: 输出价格（美元/百万 tokens）
+      capabilities:
+        type: list<string>
+        required: false
+        description: 能力标签（chat, code, vision, function_calling, json_mode）
+      status:
+        type: enum
+        values: [active, deprecated, beta]
+        required: false
+        description: 模型状态
+    links:
+      providedBy: { target: Provider, foreign_key: providerId }
+
+  ApiKey:
+    description: LLM API Key
+    properties:
+      keyId:
+        type: string
+        required: true
+        description: Key 唯一标识
+        primary_key: true
+      keyValue:
+        type: string
+        required: true
+        description: API Key 值（脱敏存储）
+      providerId:
+        type: string
+        required: true
+        description: 所属提供商
+      baseUrlId:
+        type: string
+        required: false
+        description: 绑定的 Base URL（不填则用默认）
+      label:
+        type: string
+        required: false
+        description: Key 的备注标签
+      source:
+        type: enum
+        values: [official, leaked, shared, purchased, free_tier]
+        required: false
+        description: Key 来源
+      status:
+        type: enum
+        values: [active, expired, revoked, quota_exceeded, untested]
+        required: false
+        description: Key 状态
+      balance:
+        type: float
+        required: false
+        description: 余额（美元，-1 表示未知）
+      rateLimit:
+        type: int
+        required: false
+        description: 每分钟请求限制
+      lastTestedAt:
+        type: datetime
+        required: false
+        description: 最近测试时间
+      createdAt:
+        type: datetime
+        required: false
+        description: 创建时间
+    links:
+      fromProvider: { target: Provider, foreign_key: providerId }
+      viaBaseURL: { target: BaseURL, foreign_key: baseUrlId }
+
+  KeyModelMapping:
+    description: Key 与模型的可用映射关系（一个 Key 能调哪些模型）
+    properties:
+      mappingId:
+        type: string
+        required: true
+        description: 映射唯一标识
+        primary_key: true
+      keyId:
+        type: string
+        required: true
+        description: API Key ID
+      modelId:
+        type: string
+        required: true
+        description: 模型 ID
+      available:
+        type: bool
+        required: false
+        description: 是否可用
+      testedAt:
+        type: datetime
+        required: false
+        description: 测试时间
+      failReason:
+        type: string
+        required: false
+        description: 不可用原因
+    links:
+      keyRef: { target: ApiKey, foreign_key: keyId }
+      modelRef: { target: Model, foreign_key: modelId }
+
+  MonitorGroup:
+    description: Key 分组（按用途、机器、项目等维度分组管理）
+    properties:
+      groupId:
+        type: string
+        required: true
+        description: 分组唯一标识
+        primary_key: true
+      name:
+        type: string
+        required: true
+        description: 分组名称
+      description:
+        type: string
+        required: false
+        description: 分组说明
+
+  Monitor:
+    description: 监控配置（Key + BaseURL + Model 的组合，持续健康检测）
+    properties:
+      monitorId:
+        type: string
+        required: true
+        description: 监控唯一标识
+        primary_key: true
+      name:
+        type: string
+        required: true
+        description: 监控名称
+      keyId:
+        type: string
+        required: true
+        description: 关联的 API Key
+      baseUrlId:
+        type: string
+        required: true
+        description: 关联的 Base URL
+      modelId:
+        type: string
+        required: true
+        description: 首选模型
+      groupId:
+        type: string
+        required: false
+        description: 所属分组
+      protocol:
+        type: enum
+        values: [openai, anthropic, gemini]
+        required: false
+        description: 协议类型
+      enabled:
+        type: bool
+        required: false
+        description: 是否启用
+      fetchModels:
+        type: bool
+        required: false
+        description: 是否拉取全量模型构建降级链
+      fallbackModels:
+        type: list<string>
+        required: false
+        description: 降级模型链（首选模型不可用时依次尝试）
+      lastStatus:
+        type: enum
+        values: [operational, degraded, error, failed]
+        required: false
+        description: 最近检测状态
+      lastLatency:
+        type: int
+        required: false
+        description: 最近检测延迟（毫秒）
+      lastMessage:
+        type: string
+        required: false
+        description: 最近检测结果消息
+      lastCheckedAt:
+        type: datetime
+        required: false
+        description: 最近检测时间
+    links:
+      usesKey: { target: ApiKey, foreign_key: keyId }
+      viaBaseURL: { target: BaseURL, foreign_key: baseUrlId }
+      preferredModel: { target: Model, foreign_key: modelId }
+      inGroup: { target: MonitorGroup, foreign_key: groupId }
+
+  HealthCheck:
+    description: 健康检查记录（每次检测的结果快照）
+    properties:
+      checkId:
+        type: string
+        required: true
+        description: 检查记录唯一标识
+        primary_key: true
+      monitorId:
+        type: string
+        required: true
+        description: 关联的监控
+      status:
+        type: enum
+        values: [operational, degraded, error, failed]
+        required: true
+        description: 检测状态
+      latencyMs:
+        type: int
+        required: false
+        description: 延迟（毫秒）
+      message:
+        type: string
+        required: false
+        description: 结果消息（错误原因或通过信息）
+      checkedAt:
+        type: datetime
+        required: true
+        description: 检测时间
+    links:
+      forMonitor: { target: Monitor, foreign_key: monitorId }
+
+  MonitorTemplate:
+    description: 可复用的监控模板（BaseURL + 模型列表 + 协议类型）
+    properties:
+      templateId:
+        type: string
+        required: true
+        description: 模板唯一标识
+        primary_key: true
+      name:
+        type: string
+        required: true
+        description: 模板名称
+      baseUrlId:
+        type: string
+        required: true
+        description: 关联的 Base URL
+      defaultModelId:
+        type: string
+        required: true
+        description: 默认模型
+      models:
+        type: list<string>
+        required: false
+        description: 模型列表（modelId 列表）
+      protocol:
+        type: enum
+        values: [openai, anthropic, gemini]
+        required: false
+        description: 协议类型
+      description:
+        type: string
+        required: false
+        description: 模板描述
+    links:
+      viaBaseURL: { target: BaseURL, foreign_key: baseUrlId }
+      defaultModel: { target: Model, foreign_key: defaultModelId }
+
+actions:
+
+  addApiKey:
+    description: "添加一个新的 API Key"
+    params:
+      keyValue: { type: string, required: true }
+      providerId: { type: string, required: true }
+      baseUrlId: { type: string, required: false }
+      label: { type: string, required: false }
+      source: { type: enum, values: [official, leaked, shared, purchased, free_tier], required: false }
+    target_type: ApiKey
+    creates: true
+    requires_confirmation: false
+
+  updateKeyStatus:
+    description: "更新 API Key 状态（测试后标记可用/不可用）"
+    params:
+      keyId: { type: string, required: true }
+      status: { type: enum, values: [active, expired, revoked, quota_exceeded, untested], required: true }
+      reason: { type: string, required: false }
+    target_type: ApiKey
+    edits: { status: status }
+    requires_confirmation: false
+
+  bindBaseURL:
+    description: "将 Key 绑定到指定的 Base URL"
+    params:
+      keyId: { type: string, required: true }
+      baseUrlId: { type: string, required: true }
+    target_type: ApiKey
+    edits: { baseUrlId: baseUrlId }
+    requires_confirmation: false
+
+  addModel:
+    description: "注册一个新模型"
+    params:
+      name: { type: string, required: true }
+      providerId: { type: string, required: true }
+      contextWindow: { type: int, required: false }
+      inputPrice: { type: float, required: false }
+      outputPrice: { type: float, required: false }
+    target_type: Model
+    creates: true
+    requires_confirmation: false
+
+  testKeyModel:
+    description: "测试某个 Key 能否调用指定模型，记录结果"
+    params:
+      keyId: { type: string, required: true }
+      modelId: { type: string, required: true }
+      available: { type: bool, required: true }
+      failReason: { type: string, required: false }
+    target_type: KeyModelMapping
+    creates: true
+    requires_confirmation: false
+
+  deprecateModel:
+    description: "将模型标记为已弃用"
+    params:
+      modelId: { type: string, required: true }
+      reason: { type: string, required: true }
+    target_type: Model
+    edits: { status: deprecated }
+    requires_confirmation: true
+
+  createMonitor:
+    description: "创建监控配置（Key + BaseURL + Model 组合）"
+    params:
+      name: { type: string, required: true }
+      keyId: { type: string, required: true }
+      baseUrlId: { type: string, required: true }
+      modelId: { type: string, required: true }
+      groupId: { type: string, required: false }
+      protocol: { type: enum, values: [openai, anthropic, gemini], required: false }
+      fetchModels: { type: bool, required: false }
+    target_type: Monitor
+    creates: true
+    requires_confirmation: false
+
+  updateMonitorStatus:
+    description: "更新监控的最新检测状态"
+    params:
+      monitorId: { type: string, required: true }
+      lastStatus: { type: enum, values: [operational, degraded, error, failed], required: true }
+      lastLatency: { type: int, required: false }
+      lastMessage: { type: string, required: false }
+    target_type: Monitor
+    edits: { lastStatus: lastStatus, lastLatency: lastLatency, lastMessage: lastMessage }
+    requires_confirmation: false
+
+  recordHealthCheck:
+    description: "记录一次健康检查结果"
+    params:
+      monitorId: { type: string, required: true }
+      status: { type: enum, values: [operational, degraded, error, failed], required: true }
+      latencyMs: { type: int, required: false }
+      message: { type: string, required: false }
+    target_type: HealthCheck
+    creates: true
+    requires_confirmation: false
+
+  toggleMonitor:
+    description: "启用或禁用监控"
+    params:
+      monitorId: { type: string, required: true }
+      enabled: { type: bool, required: true }
+    target_type: Monitor
+    edits: { enabled: enabled }
+    requires_confirmation: false
+
+  createGroup:
+    description: "创建 Key 分组"
+    params:
+      name: { type: string, required: true }
+      description: { type: string, required: false }
+    target_type: MonitorGroup
+    creates: true
+    requires_confirmation: false
+
+  createTemplate:
+    description: "创建监控模板"
+    params:
+      name: { type: string, required: true }
+      baseUrlId: { type: string, required: true }
+      defaultModelId: { type: string, required: true }
+      models: { type: list, required: false }
+      protocol: { type: enum, values: [openai, anthropic, gemini], required: false }
+      description: { type: string, required: false }
+    target_type: MonitorTemplate
+    creates: true
+    requires_confirmation: false
+
+functions:
+
+  findBestKey:
+    description: "根据模型名称找到最优可用 Key（考虑状态、余额、延迟）"
+    params:
+      modelName: { type: string, required: true }
+    returns: "{keyId, keyValue, baseUrl, provider, balance, latency}"
+    permission: findBestKey
+
+  auditKeys:
+    description: "扫描所有 Key，汇总各状态数量、即将过期、余额不足的 Key"
+    params:
+      filters: { type: object, required: false }
+    returns: "list[{keyId, label, provider, status, balance, warning}]"
+    permission: auditKeys
+
+  compareProviders:
+    description: "对比不同 Provider 的模型覆盖、价格、可用 Key 数量"
+    params:
+      providerIds: { type: list, required: true }
+    returns: "list[{providerId, name, modelCount, activeKeyCount, avgInputPrice, avgOutputPrice}]"
+    permission: compareProviders
+
+  estimateCost:
+    description: "估算指定模型处理一定 token 量的费用"
+    params:
+      modelId: { type: string, required: true }
+      inputTokens: { type: int, required: true }
+      outputTokens: { type: int, required: true }
+    returns: "{modelId, inputCost, outputCost, totalCost, currency}"
+    permission: estimateCost
+
+  getMonitorDashboard:
+    description: "获取所有监控的最新状态、延迟、可用性统计（类似 KeySpy Dashboard）"
+    params:
+      trendPeriod: { type: string, required: false }
+    returns: "{total, groups, monitors: [{monitorId, name, status, model, latency, lastMessage}]}"
+    permission: getMonitorDashboard
+
+  getGroupHealth:
+    description: "按分组获取所有监控的状态时间线和可用性统计"
+    params:
+      groupId: { type: string, required: true }
+    returns: "{groupName, monitors: [{monitorId, name, status, latency, recentChecks}]}"
+    permission: getGroupHealth
+
+  findFallbackKey:
+    description: "当某个 Key 失效时，根据分组和模型找到替代 Key"
+    params:
+      failedKeyId: { type: string, required: true }
+      modelId: { type: string, required: false }
+    returns: "{keyId, keyValue, baseUrl, model, group, latency}"
+    permission: findFallbackKey
+
+  listKeyModels:
+    description: "调用外部 API 的 /v1/models 接口，查询指定 Key 可用的全部模型列表"
+    params:
+      keyId: { type: string, required: true }
+    returns: "{keyId, baseUrl, models: [str], modelCount, latencyMs, status}"
+    permission: listKeyModels
+
+  syncKeyModels:
+    description: "调用 /v1/models 查询 Key 可用模型，并自动写入 KeyModelMapping（先查后写）"
+    params:
+      keyId: { type: string, required: true }
+    returns: "{keyId, synced, failed, models: [{modelId, available}]}"
+    permission: syncKeyModels
