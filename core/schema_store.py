@@ -131,6 +131,64 @@ class SchemaStore:
             return None
         return {"name": row[0], "description": row[1], "created_at": row[2], "updated_at": row[3]}
 
+    def copy_workspace_schema(self, src_ws: str, dst_ws: str) -> dict:
+        """从 src_ws 复制 types/functions/actions 到 dst_ws。
+
+        仅复制 schema 定义，不复制实例数据（objects 表）。
+        已存在的同名项会被覆盖。返回复制统计。
+        """
+        if src_ws == dst_ws:
+            return {"error": "source and destination workspace are the same"}
+        if not self.get_workspace_info(src_ws):
+            return {"error": f"source workspace '{src_ws}' not found"}
+        if not self.get_workspace_info(dst_ws):
+            return {"error": f"destination workspace '{dst_ws}' not found"}
+
+        original = self._workspace
+        try:
+            self._workspace = src_ws
+            types = self.list_types()
+            functions = self.list_functions()
+            actions = self.list_actions()
+
+            self._workspace = dst_ws
+            for t in types:
+                self.save_type(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    properties=t.get("properties", {}),
+                    links=t.get("links", {}),
+                )
+            for f in functions:
+                self.save_function(
+                    name=f["name"],
+                    description=f.get("description", ""),
+                    params=f.get("params", {}),
+                    returns=f.get("returns", ""),
+                    code=f.get("code", "") or "",
+                    permission=f.get("permission", ""),
+                )
+            for a in actions:
+                self.save_action(
+                    name=a["name"],
+                    description=a.get("description", ""),
+                    params=a.get("params", {}),
+                    target_type=a.get("target_type", ""),
+                    edits=a.get("edits", {}),
+                    creates=a.get("creates", False),
+                    requires_confirmation=a.get("requires_confirmation", False),
+                )
+            return {
+                "status": "copied",
+                "source": src_ws,
+                "destination": dst_ws,
+                "types": len(types),
+                "functions": len(functions),
+                "actions": len(actions),
+            }
+        finally:
+            self._workspace = original
+
     # ── Object Types ─────────────────────────────────────────────────────
 
     def save_type(self, name: str, description: str, properties: dict, links: dict) -> None:

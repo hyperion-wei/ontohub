@@ -143,17 +143,20 @@ def _sync_actions_from_yaml(schema_store: SchemaStore, ontology_path: str) -> in
 
 
 def _ensure_default_workspace_instance(store: ObjectStore, schema_store: SchemaStore) -> None:
-    """确保每个已存在的 workspace 内都有一个同名 Workspace 实例（便于 traverse）。"""
-    try:
-        if not schema_store.get_type("Workspace"):
-            return
-        pk = schema_store.get_primary_key("Workspace")
-    except (KeyError, ValueError):
-        return
-    original = store.get_workspace()
+    """确保每个定义了 Workspace 类型的 workspace 内都有一个同名 Workspace 实例（便于 traverse）。"""
+    original_schema_ws = schema_store.get_workspace()
+    original_store_ws = store.get_workspace()
     try:
         for ws in schema_store.list_workspaces():
             name = ws["name"]
+            # 逐个 workspace 检查，empty 模板的 workspace 没有 Workspace 类型则跳过
+            schema_store.set_workspace(name)
+            if not schema_store.get_type("Workspace"):
+                continue
+            try:
+                pk = schema_store.get_primary_key("Workspace")
+            except (KeyError, ValueError):
+                continue
             store.set_workspace(name)
             if store.get("Workspace", name) is None:
                 store.create("Workspace", name, {
@@ -164,7 +167,8 @@ def _ensure_default_workspace_instance(store: ObjectStore, schema_store: SchemaS
                     "createdAt": ws.get("created_at") or datetime.now(timezone.utc).isoformat(),
                 })
     finally:
-        store.set_workspace(original)
+        schema_store.set_workspace(original_schema_ws)
+        store.set_workspace(original_store_ws)
 
 
 def create_mcp_server(config_dir: str = CONFIG_DIR, db_path: str = DB_PATH) -> MCPServer:
@@ -444,12 +448,17 @@ async def list_workspaces(request: Request):
 
 @app.post("/api/workspaces")
 async def create_workspace(request: Request):
-    """创建新工作空间。"""
+    """创建新工作空间（可选模板：empty / default / yaml）。"""
     body = await request.json()
     name = body.get("name", "")
     description = body.get("description", "")
+    template = body.get("template", "empty")
     mcp: MCPServer = request.app.state.mcp
-    return mcp._admin._create_workspace({"name": name, "description": description})
+    return mcp._admin._create_workspace({
+        "name": name,
+        "description": description,
+        "template": template,
+    })
 
 
 @app.delete("/api/workspaces/{name}")

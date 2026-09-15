@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -9,6 +10,14 @@ from ontohub.core.audit import AuditLogger
 from ontohub.dynamic_functions import DynamicFunctionRegistry, SandboxError
 from ontohub.graph_builder import build_graph
 from ontohub.tool_governance import ToolGovernance
+
+
+# YAML 本体模板路径（创建 workspace 时 template=yaml 使用）
+_DEFAULT_CONFIG_DIR = os.environ.get(
+    "ONTOHUB_CONFIG",
+    os.path.join(os.path.dirname(__file__), "config"),
+)
+_DEFAULT_ONTOLOGY_YAML = os.path.join(_DEFAULT_CONFIG_DIR, "skill_ontology.yaml")
 
 
 class AdminTools:
@@ -34,12 +43,18 @@ class AdminTools:
         return [
             {
                 "name": "ontology_create_workspace",
-                "description": "创建新的工作空间",
+                "description": "创建新的工作空间（可选择空白或从模板初始化）",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "工作空间名称"},
                         "description": {"type": "string", "description": "工作空间描述"},
+                        "template": {
+                            "type": "string",
+                            "enum": ["empty", "default", "yaml"],
+                            "description": "初始化模板：empty=空白（默认），default=复制 default workspace 的 types/functions/actions，yaml=从 config/skill_ontology.yaml 导入官方本体模板",
+                            "default": "empty",
+                        },
                     },
                     "required": ["name"],
                 },
@@ -328,38 +343,88 @@ class AdminTools:
     def _create_workspace(self, args: dict) -> dict:
         name = args["name"]
         description = args.get("description", "")
+        template = (args.get("template") or "empty").strip().lower()
+        if template not in ("empty", "default", "yaml"):
+            return {"error": f"Invalid template '{template}'. Must be one of: empty, default, yaml"}
+
         result = self._schema_store.create_workspace(name, description)
-        if "error" not in result:
-            self._audit.log("system", "create_workspace", name)
-            # 同步在新 workspace 内创建 Workspace 实例（代表自身），
-            # 以便 Skill.belongsToWorkspace 等关系能被 traverse。
-            self._ensure_workspace_instance(name, description)
+        if "error" in result:
+            return result
+
+        self._audit.log("system", "create_workspace", name)
+
+        # 应用模板
+        applied = self._apply_workspace_template(name, template)
+
+        # 同步在新 workspace 内创建 Workspace 实例（代表自身），
+        # 以便 Skill.belongsToWorkspace 等关系能被 traverse。
+        self._ensure_workspace_instance(name, description)
+
+        result["template"] = template
+        result["applied"] = applied
         return result
+
+    def _apply_workspace_template(self, ws_name: str, template: str) -> dict:
+        """为新建的 workspace 应用模板，返回应用统计。"""
+        stats = {"types": 0, "functions": 0, "actions": 0}
+        if template == "empty":
+            return stats
+
+        if template == "default":
+            copy_result = self._schema_store.copy_workspace_schema("default", ws_name)
+            if "error" in copy_result:
+                stats["error"] = copy_result["error"]
+                return stats
+            stats["types"] = copy_result.get("types", 0)
+            stats["functions"] = copy_result.get("functions", 0)
+            stats["actions"] = copy_result.get("actions", 0)
+            return stats
+
+        # template == "yaml"
+        yaml_path = _DEFAULT_ONTOLOGY_YAML
+        if not os.path.exists(yaml_path):
+            stats["error"] = f"YAML template not found: {yaml_path}"
+            return stats
+        original_ws = self._schema_store.get_workspace()
+        try:
+            self._schema_store.set_workspace(ws_name)
+            counts = self._schema_store.import_from_yaml(yaml_path)
+            stats["types"] = counts.get("types", 0)
+            stats["functions"] = counts.get("functions", 0)
+            stats["actions"] = counts.get("actions", 0)
+        finally:
+            self._schema_store.set_workspace(original_ws)
+        return stats
 
     def _ensure_workspace_instance(self, ws_name: str, description: str = "") -> None:
         """确保指定 workspace 内存在一个同名的 Workspace 实例。
 
-        仅当当前本体定义了 Workspace 类型时才写入；失败不报错（不影响 workspace 创建）。
+        仅当目标 workspace 本体定义了 Workspace 类型时才写入（empty 模板的 workspace
+        没有 Workspace 类型，也就不会创建实例）。失败不报错（不影响 workspace 创建）。
         """
+        original_schema_ws = self._schema_store.get_workspace()
+        original_store_ws = self._store.get_workspace()
         try:
+            # 先切换到目标 workspace 检查类型是否存在
+            self._schema_store.set_workspace(ws_name)
             if not self._schema_store.get_type("Workspace"):
                 return
             pk = self._schema_store.get_primary_key("Workspace")
-            original_ws = self._store.get_workspace()
-            try:
-                self._store.set_workspace(ws_name)
-                if self._store.get("Workspace", ws_name) is None:
-                    self._store.create("Workspace", ws_name, {
-                        pk: ws_name,
-                        "name": ws_name,
-                        "description": description,
-                        "status": "active",
-                        "createdAt": datetime.now(timezone.utc).isoformat(),
-                    })
-            finally:
-                self._store.set_workspace(original_ws)
+
+            self._store.set_workspace(ws_name)
+            if self._store.get("Workspace", ws_name) is None:
+                self._store.create("Workspace", ws_name, {
+                    pk: ws_name,
+                    "name": ws_name,
+                    "description": description,
+                    "status": "active",
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                })
         except Exception:
             pass
+        finally:
+            self._schema_store.set_workspace(original_schema_ws)
+            self._store.set_workspace(original_store_ws)
 
     def _delete_workspace(self, args: dict) -> dict:
         name = args["name"]

@@ -48,6 +48,7 @@ export default function App() {
   const [showWorkspaceModal, setShowWorkspaceModal] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [newWorkspaceDesc, setNewWorkspaceDesc] = useState('')
+  const [newWorkspaceTemplate, setNewWorkspaceTemplate] = useState<'empty' | 'default' | 'yaml'>('empty')
   const [refreshKey, setRefreshKey] = useState(0)
 
   // 加载 workspace 列表
@@ -98,15 +99,23 @@ export default function App() {
     fetch('/api/workspaces', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newWorkspaceName, description: newWorkspaceDesc }),
+      body: JSON.stringify({
+        name: newWorkspaceName,
+        description: newWorkspaceDesc,
+        template: newWorkspaceTemplate,
+      }),
     })
       .then(r => r.json())
       .then(data => {
         if (data.status === 'created') {
           loadWorkspaces()
+          loadSchema()
           setShowWorkspaceModal(false)
           setNewWorkspaceName('')
           setNewWorkspaceDesc('')
+          setNewWorkspaceTemplate('empty')
+        } else if (data.error) {
+          alert(`创建失败: ${data.error}`)
         }
       })
       .catch(() => {})
@@ -238,6 +247,32 @@ export default function App() {
                     placeholder="描述（可选）"
                     className="w-full text-sm border rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
+                  {/* 模板选择 */}
+                  <div className="space-y-1">
+                    <label className="text-xs text-gray-500">初始化模板</label>
+                    <div className="space-y-1 border rounded p-2 bg-gray-50">
+                      {([
+                        { value: 'empty', label: '空白', hint: '不导入任何类型/函数/操作' },
+                        { value: 'default', label: '复制 default', hint: '从当前 default 工作空间完整复制 schema' },
+                        { value: 'yaml', label: 'Skill 官方模板', hint: '从 skill_ontology.yaml 导入 Skill 本体（3 类型 / 5 函数 / 7 操作）' },
+                      ] as const).map(opt => (
+                        <label key={opt.value} className="flex items-start gap-2 text-xs cursor-pointer hover:bg-white rounded px-1 py-0.5">
+                          <input
+                            type="radio"
+                            name="ws-template"
+                            value={opt.value}
+                            checked={newWorkspaceTemplate === opt.value}
+                            onChange={() => setNewWorkspaceTemplate(opt.value)}
+                            className="mt-0.5"
+                          />
+                          <div className="flex-1">
+                            <div className="font-medium text-gray-700">{opt.label}</div>
+                            <div className="text-gray-500 text-[11px] leading-tight">{opt.hint}</div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                   <button
                     onClick={handleCreateWorkspace}
                     className="w-full text-sm bg-blue-600 text-white rounded px-3 py-2 hover:bg-blue-700 transition-colors"

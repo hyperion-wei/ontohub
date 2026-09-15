@@ -1,0 +1,21 @@
+feat(workspace): 创建 workspace 时支持 empty/default/yaml 三种初始化模板
+
+后端：
+- schema_store 新增 copy_workspace_schema(src, dst)：跨 workspace 复制
+  types/functions/actions（含 function code），不复制实例数据
+- admin_tools._create_workspace 新增 template 参数：
+  * empty（默认）：完全空白，不导入任何 schema
+  * default：从 default workspace 完整复制 schema
+  * yaml：从 config/skill_ontology.yaml 导入官方本体模板
+- MCP tool schema 暴露 template enum 供 Agent 选择
+- HTTP POST /api/workspaces 接受 template 字段
+- 修复 _ensure_workspace_instance：仅在目标 workspace 定义了 Workspace
+  类型时才创建实例，避免 empty 模板意外产生孤儿数据
+- 启动时 _ensure_default_workspace_instance 同样逐个 workspace 检查
+
+前端：
+- App.tsx 工作空间管理模态框新增“初始化模板”单选组
+  （空白 / 复制 default / Skill 官方模板），每项带说明
+- 创建成功后同步刷新 schema，失败时 alert 提示错误信息
+
+测试：41/41 通过（三种模板 + 非法值拒绝 + HTTP endpoint + 清理）
