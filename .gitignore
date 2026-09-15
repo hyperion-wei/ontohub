@@ -22,3 +22,9 @@ Thumbs.db
 
 # Env
 .env
+
+# Local dev artifacts
+_commit_msg.txt
+_uvicorn*.log
+_*.py
+!__init__.py
