@@ -8,6 +8,77 @@ from ontohub.business_tools import BusinessTools
 from ontohub.tool_governance import ToolGovernance
 
 
+# MCP 初始化提示 — 帮助 Agent 了解本体结构和使用方法
+MCP_INSTRUCTIONS = """
+# Ontology Hub MCP Server
+
+你是一个 AI Agent，已连接到 Ontology Hub（本体管理中心）。
+
+## 核心概念
+
+### 本体（Ontology）
+本体是知识的结构化表示，包含：
+- **对象类型（Object Type）**：定义实体的属性和关系，如 Skill、Workspace
+- **实例（Instance）**：对象类型的具体实例
+- **函数（Function）**：只读查询逻辑，无副作用
+- **操作（Action）**：数据变更操作，可能需要确认
+
+### 工作空间（Workspace）
+- 每个 Workspace 是独立的本体空间
+- 不同 Workspace 的数据完全隔离
+- 使用 `ontology_list_workspaces` 查看所有工作空间
+- 使用 `ontology_switch_workspace` 切换工作空间
+
+### Skill（技能）
+Skill 是 AI Agent 的能力定义，包含：
+- `trigger`: 触发条件（何时使用此技能）
+- `prompt`: 提示词模板（如何执行）
+- `tools`: 依赖的工具列表
+
+## 快速开始
+
+### 1. 了解当前本体结构
+```
+调用 ontology_get_schema 获取完整的本体定义
+调用 ontology_list_types 查看所有对象类型
+```
+
+### 2. 查看可用的 Skill
+```
+调用 function:searchSkills 搜索技能
+调用 function:listSkillsByWorkspace 列出工作空间中的技能
+```
+
+### 3. 执行 Skill
+```
+根据 Skill 的 prompt 指导执行相应操作
+使用 action:recordExecution 记录执行结果
+```
+
+## 工具命名规则
+
+| 前缀 | 类型 | 说明 |
+|------|------|------|
+| `ontology_*` | Admin Tool | 本体管理工具（创建类型、实例等） |
+| `function:*` | Function | 只读查询函数 |
+| `action:*` | Action | 数据变更操作 |
+
+## 注意事项
+
+1. **权限控制**：不同角色有不同的工具权限
+2. **确认机制**：某些 Action 需要 `confirmed=true` 确认后执行
+3. **Workspace 隔离**：确保在正确的 Workspace 中操作
+4. **审计日志**：所有操作都会记录审计日志
+
+## 当前状态
+
+- 当前 Workspace: {workspace}
+- 可用工具数量: {tool_count}
+- 对象类型数量: {type_count}
+- Skill 数量: {skill_count}
+"""
+
+
 class MCPServer:
     """MCP 协议服务器 — 处理工具发现、工具调用、权限过滤。"""
 
@@ -48,6 +119,28 @@ class MCPServer:
             "user_id": params.get("user_id", "anonymous"),
             "initialized": True,
         }
+        
+        # 获取当前状态信息
+        workspace = self._admin._schema_store.get_workspace()
+        all_tools = self._get_all_tools()
+        types = self._admin._schema_store.list_types()
+        
+        # 统计 Skill 数量
+        skill_count = 0
+        try:
+            skills = self._admin._store.query("Skill", None, None)
+            skill_count = len(skills)
+        except:
+            pass
+        
+        # 生成个性化提示
+        instructions = MCP_INSTRUCTIONS.format(
+            workspace=workspace,
+            tool_count=len(all_tools),
+            type_count=len(types),
+            skill_count=skill_count,
+        )
+        
         return self._result(msg_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -56,15 +149,36 @@ class MCPServer:
             "serverInfo": {
                 "name": "ontohub",
                 "version": "0.1.0",
+                "description": "Ontology Hub - AI Agent 本体管理中心",
             },
             "sessionId": sid,
+            "instructions": instructions,
         })
 
     def _handle_tools_list(self, msg_id: Any, session_id: str | None) -> dict:
         role = self._get_role(session_id)
         all_tools = self._get_all_tools()
         filtered = self._governance.filter_tools(role, all_tools)
-        return self._result(msg_id, {"tools": filtered})
+        
+        # 按类型分组工具
+        admin_tools = [t for t in filtered if t["name"].startswith("ontology_")]
+        function_tools = [t for t in filtered if t["name"].startswith("function:")]
+        action_tools = [t for t in filtered if t["name"].startswith("action:")]
+        
+        return self._result(msg_id, {
+            "tools": filtered,
+            "summary": {
+                "total": len(filtered),
+                "admin": len(admin_tools),
+                "function": len(function_tools),
+                "action": len(action_tools),
+            },
+            "hints": {
+                "admin": "ontology_* 工具用于管理本体结构（类型、实例、工作空间）",
+                "function": "function:* 工具用于查询数据（只读，无副作用）",
+                "action": "action:* 工具用于修改数据（可能需要确认）",
+            }
+        })
 
     def _handle_tools_call(self, msg_id: Any, params: dict, session_id: str | None) -> dict:
         tool_name = params.get("name", "")

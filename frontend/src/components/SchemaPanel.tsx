@@ -30,21 +30,21 @@ export function SchemaPanel() {
   const [tab, setTab] = useState<'types' | 'functions' | 'actions'>('types')
 
   useEffect(() => {
-    Promise.all([
-      fetch('/api/schema').then(r => r.json()),
-    ]).then(([schemaData]) => {
-      setSchema(schemaData)
-      // Build type list
-      const typeList: TypeInfo[] = Object.values(schemaData.object_types || {}).map((t: any) => ({
-        name: t.name,
-        description: t.description,
-        propertyCount: Object.keys(t.properties || {}).length,
-        linkCount: Object.keys(t.links || {}).length,
-        instanceCount: 0,
-      }))
-      setTypes(typeList)
-      setLoading(false)
-    }).catch(() => setLoading(false))
+    fetch('/api/schema')
+      .then(r => r.json())
+      .then(schemaData => {
+        setSchema(schemaData)
+        const typeList: TypeInfo[] = Object.values(schemaData.object_types || {}).map((t: any) => ({
+          name: t.name,
+          description: t.description,
+          propertyCount: Object.keys(t.properties || {}).length,
+          linkCount: Object.keys(t.links || {}).length,
+          instanceCount: 0,
+        }))
+        setTypes(typeList)
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
   }, [])
 
   if (loading) {

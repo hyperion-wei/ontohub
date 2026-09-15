@@ -1,0 +1,322 @@
+# Skill 本体定义 — AI Agent 技能管理
+object_types:
+
+  Skill:
+    description: AI Agent 技能定义，包含触发条件、提示词模板和依赖工具
+    properties:
+      skillId:
+        type: string
+        required: true
+        primary_key: true
+        id_prefix: SKI
+        description: 技能唯一标识
+      name:
+        type: string
+        required: true
+        description: 技能名称
+      description:
+        type: string
+        required: false
+        description: 技能描述
+      trigger:
+        type: string
+        required: true
+        description: 触发条件（自然语言描述何时使用此技能）
+      prompt:
+        type: string
+        required: true
+        description: 提示词模板（指导 Agent 如何执行）
+      tools:
+        type: list<string>
+        required: false
+        description: 依赖的工具列表（MCP Tool 名称）
+      workspace:
+        type: string
+        required: true
+        description: 所属工作空间
+      status:
+        type: enum
+        values: [active, draft, deprecated]
+        required: false
+        description: 技能状态
+      version:
+        type: string
+        required: false
+        description: 版本号
+      author:
+        type: string
+        required: false
+        description: 创建者
+      createdAt:
+        type: datetime
+        required: false
+        description: 创建时间
+      updatedAt:
+        type: datetime
+        required: false
+        description: 更新时间
+    links:
+      belongsToWorkspace: { target: Workspace, foreign_key: workspace }
+
+  Workspace:
+    description: 工作空间，用于隔离不同的技能集合
+    properties:
+      workspaceId:
+        type: string
+        required: true
+        primary_key: true
+        id_prefix: WKS
+        description: 工作空间唯一标识
+      name:
+        type: string
+        required: true
+        description: 工作空间名称
+      description:
+        type: string
+        required: false
+        description: 工作空间描述
+      status:
+        type: enum
+        values: [active, archived]
+        required: false
+        description: 状态
+      createdAt:
+        type: datetime
+        required: false
+        description: 创建时间
+
+  SkillExecution:
+    description: 技能执行记录
+    properties:
+      executionId:
+        type: string
+        required: true
+        primary_key: true
+        id_prefix: EXE
+        description: 执行记录唯一标识
+      skillId:
+        type: string
+        required: true
+        description: 执行的技能 ID
+      input:
+        type: object
+        required: false
+        description: 输入参数
+      output:
+        type: object
+        required: false
+        description: 输出结果
+      status:
+        type: enum
+        values: [success, failed, running]
+        required: true
+        description: 执行状态
+      errorMessage:
+        type: string
+        required: false
+        description: 错误信息
+      startedAt:
+        type: datetime
+        required: true
+        description: 开始时间
+      completedAt:
+        type: datetime
+        required: false
+        description: 完成时间
+      executedBy:
+        type: string
+        required: false
+        description: 执行者（Agent ID）
+    links:
+      skillRef: { target: Skill, foreign_key: skillId }
+
+actions:
+
+  createSkill:
+    description: "创建新的 AI Skill"
+    params:
+      name: { type: string, required: true }
+      description: { type: string, required: false }
+      trigger: { type: string, required: true }
+      prompt: { type: string, required: true }
+      tools: { type: list, required: false }
+      workspace: { type: string, required: true }
+    target_type: Skill
+    creates: true
+    requires_confirmation: false
+
+  updateSkill:
+    description: "更新 Skill 定义"
+    params:
+      skillId: { type: string, required: true }
+      name: { type: string, required: false }
+      description: { type: string, required: false }
+      trigger: { type: string, required: false }
+      prompt: { type: string, required: false }
+      tools: { type: list, required: false }
+      status: { type: enum, values: [active, draft, deprecated], required: false }
+    target_type: Skill
+    edits: { name: name, description: description, trigger: trigger, prompt: prompt, tools: tools, status: status }
+    requires_confirmation: true
+
+  deleteSkill:
+    description: "删除 Skill"
+    params:
+      skillId: { type: string, required: true }
+    target_type: Skill
+    edits: { status: deprecated }
+    requires_confirmation: true
+
+  activateSkill:
+    description: "激活 Skill"
+    params:
+      skillId: { type: string, required: true }
+    target_type: Skill
+    edits: { status: active }
+    requires_confirmation: false
+
+  createWorkspace:
+    description: "创建工作空间"
+    params:
+      name: { type: string, required: true }
+      description: { type: string, required: false }
+    target_type: Workspace
+    creates: true
+    requires_confirmation: false
+
+  archiveWorkspace:
+    description: "归档工作空间"
+    params:
+      workspaceId: { type: string, required: true }
+    target_type: Workspace
+    edits: { status: archived }
+    requires_confirmation: true
+
+  recordExecution:
+    description: "记录 Skill 执行结果"
+    params:
+      skillId: { type: string, required: true }
+      input: { type: object, required: false }
+      output: { type: object, required: false }
+      status: { type: enum, values: [success, failed, running], required: true }
+      errorMessage: { type: string, required: false }
+      executedBy: { type: string, required: false }
+    target_type: SkillExecution
+    creates: true
+    requires_confirmation: false
+
+functions:
+
+  findSkillByTrigger:
+    description: "根据触发条件查找匹配的 Skill"
+    params:
+      query: { type: string, required: true }
+      workspace: { type: string, required: false }
+    returns: "list[{skillId, name, trigger, prompt, tools}]"
+    permission: findSkillByTrigger
+    code: |
+      query_text = (params.get('query') or '').strip().lower()
+      workspace = params.get('workspace')
+      skills = store.query('Skill', None, None)
+      matched = []
+      for s in skills:
+          if workspace and s.get('workspace') != workspace:
+              continue
+          trigger = (s.get('trigger') or '').lower()
+          if not query_text or query_text in trigger or trigger in query_text:
+              matched.append({
+                  'skillId': s.get('skillId'),
+                  'name': s.get('name'),
+                  'trigger': s.get('trigger'),
+                  'prompt': s.get('prompt'),
+                  'tools': s.get('tools'),
+              })
+      return matched
+
+  listSkillsByWorkspace:
+    description: "列出指定工作空间的所有 Skill"
+    params:
+      workspace: { type: string, required: true }
+      status: { type: enum, values: [active, draft, deprecated], required: false }
+    returns: "list[{skillId, name, description, status, version}]"
+    permission: listSkillsByWorkspace
+    code: |
+      workspace = params.get('workspace')
+      status = params.get('status')
+      filters = {}
+      if workspace:
+          filters['workspace'] = workspace
+      if status:
+          filters['status'] = status
+      skills = store.query('Skill', filters or None, None)
+      return [{
+          'skillId': s.get('skillId'),
+          'name': s.get('name'),
+          'description': s.get('description'),
+          'status': s.get('status'),
+          'version': s.get('version'),
+      } for s in skills]
+
+  getSkillDetail:
+    description: "获取 Skill 详细信息"
+    params:
+      skillId: { type: string, required: true }
+    returns: "{skillId, name, description, trigger, prompt, tools, status, version, author, createdAt, updatedAt}"
+    permission: getSkillDetail
+    code: |
+      skill_id = params.get('skillId')
+      s = store.get('Skill', skill_id) if skill_id else None
+      if not s:
+          return {'error': 'Skill not found: ' + str(skill_id)}
+      return s
+
+  getSkillExecutionHistory:
+    description: "获取 Skill 执行历史"
+    params:
+      skillId: { type: string, required: true }
+      limit: { type: int, required: false }
+    returns: "list[{executionId, input, output, status, startedAt, completedAt}]"
+    permission: getSkillExecutionHistory
+    code: |
+      skill_id = params.get('skillId')
+      limit = params.get('limit') or 20
+      executions = store.query('SkillExecution', {'skillId': skill_id}, None) if skill_id else []
+      executions = sorted(executions, key=lambda e: e.get('startedAt') or '', reverse=True)
+      return [{
+          'executionId': e.get('executionId'),
+          'input': e.get('input'),
+          'output': e.get('output'),
+          'status': e.get('status'),
+          'startedAt': e.get('startedAt'),
+          'completedAt': e.get('completedAt'),
+      } for e in executions[:limit]]
+
+  searchSkills:
+    description: "搜索 Skill（按名称、描述、触发条件）"
+    params:
+      keyword: { type: string, required: true }
+      workspace: { type: string, required: false }
+    returns: "list[{skillId, name, description, trigger, workspace}]"
+    permission: searchSkills
+    code: |
+      keyword = (params.get('keyword') or '').strip().lower()
+      workspace = params.get('workspace')
+      skills = store.query('Skill', None, None)
+      matched = []
+      for s in skills:
+          if workspace and s.get('workspace') != workspace:
+              continue
+          haystack = ' '.join([
+              str(s.get('name') or ''),
+              str(s.get('description') or ''),
+              str(s.get('trigger') or ''),
+          ]).lower()
+          if not keyword or keyword in haystack:
+              matched.append({
+                  'skillId': s.get('skillId'),
+                  'name': s.get('name'),
+                  'description': s.get('description'),
+                  'trigger': s.get('trigger'),
+                  'workspace': s.get('workspace'),
+              })
+      return matched

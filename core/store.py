@@ -6,19 +6,28 @@ from typing import Any
 
 
 class ObjectStore:
-    """实例存储层 — SQLite 单表 JSON 存储，支持 CRUD 和关系遍历。"""
+    """实例存储层 — SQLite 单表 JSON 存储，支持 CRUD 和关系遍历，支持 workspace 隔离。"""
 
-    def __init__(self, db_path: str, _data: dict | None = None):
+    def __init__(self, db_path: str, workspace: str = "default", _data: dict | None = None):
         self._db_path = db_path
+        self._workspace = workspace
         self._in_memory: dict[str, dict[str, dict]] | None = _data
         if self._in_memory is None:
             self._init_db()
+
+    def set_workspace(self, workspace: str) -> None:
+        """切换当前 workspace。"""
+        self._workspace = workspace
+
+    def get_workspace(self) -> str:
+        """获取当前 workspace。"""
+        return self._workspace
 
     def clear_all(self) -> None:
         if self._in_memory is not None:
             self._in_memory.clear()
         with sqlite3.connect(self._db_path) as conn:
-            conn.execute("DELETE FROM objects")
+            conn.execute("DELETE FROM objects WHERE workspace=?", (self._workspace,))
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
@@ -26,8 +35,9 @@ class ObjectStore:
                 CREATE TABLE IF NOT EXISTS objects (
                     object_type TEXT NOT NULL,
                     object_id TEXT NOT NULL,
+                    workspace TEXT DEFAULT 'default',
                     data TEXT NOT NULL,
-                    PRIMARY KEY (object_type, object_id)
+                    PRIMARY KEY (workspace, object_type, object_id)
                 )
             """)
 
@@ -40,8 +50,8 @@ class ObjectStore:
             )
         with sqlite3.connect(self._db_path) as conn:
             row = conn.execute(
-                "SELECT data FROM objects WHERE object_type=? AND object_id=?",
-                (object_type, object_id),
+                "SELECT data FROM objects WHERE workspace=? AND object_type=? AND object_id=?",
+                (self._workspace, object_type, object_id),
             ).fetchone()
         return json.loads(row[0]) if row else None
 
@@ -80,8 +90,8 @@ class ObjectStore:
             return self._in_memory.get(object_type, {}).pop(object_id, None) is not None
         with sqlite3.connect(self._db_path) as conn:
             cursor = conn.execute(
-                "DELETE FROM objects WHERE object_type=? AND object_id=?",
-                (object_type, object_id),
+                "DELETE FROM objects WHERE workspace=? AND object_type=? AND object_id=?",
+                (self._workspace, object_type, object_id),
             )
             return cursor.rowcount > 0
 
@@ -117,6 +127,7 @@ class ObjectStore:
             }
         forked = ObjectStore.__new__(ObjectStore)
         forked._db_path = self._db_path
+        forked._workspace = self._workspace
         forked._in_memory = data
         return forked
 
@@ -127,7 +138,8 @@ class ObjectStore:
             return list(self._in_memory.keys())
         with sqlite3.connect(self._db_path) as conn:
             rows = conn.execute(
-                "SELECT DISTINCT object_type FROM objects"
+                "SELECT DISTINCT object_type FROM objects WHERE workspace=?",
+                (self._workspace,)
             ).fetchall()
         return [r[0] for r in rows]
 
@@ -141,7 +153,8 @@ class ObjectStore:
             return [copy.deepcopy(v) for v in self._in_memory.get(object_type, {}).values()]
         with sqlite3.connect(self._db_path) as conn:
             rows = conn.execute(
-                "SELECT data FROM objects WHERE object_type=?", (object_type,)
+                "SELECT data FROM objects WHERE workspace=? AND object_type=?",
+                (self._workspace, object_type)
             ).fetchall()
         return [json.loads(r[0]) for r in rows]
 
@@ -151,8 +164,8 @@ class ObjectStore:
             return
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO objects VALUES (?,?,?)",
-                (object_type, object_id, json.dumps(data, ensure_ascii=False)),
+                "INSERT OR REPLACE INTO objects VALUES (?,?,?,?)",
+                (object_type, object_id, self._workspace, json.dumps(data, ensure_ascii=False)),
             )
 
     def _matches(self, obj: dict, filters: dict) -> bool:

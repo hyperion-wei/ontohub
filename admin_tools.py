@@ -33,6 +33,56 @@ class AdminTools:
     def get_tool_definitions(self) -> list[dict]:
         return [
             {
+                "name": "ontology_create_workspace",
+                "description": "创建新的工作空间",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "工作空间名称"},
+                        "description": {"type": "string", "description": "工作空间描述"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_delete_workspace",
+                "description": "删除工作空间及其所有数据",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "工作空间名称"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_list_workspaces",
+                "description": "列出所有工作空间",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "ontology_switch_workspace",
+                "description": "切换当前工作空间",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "工作空间名称"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "ontology_get_current_workspace",
+                "description": "获取当前工作空间信息",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
                 "name": "ontology_create_type",
                 "description": "创建新的对象类型（定义属性、主键、关系）",
                 "inputSchema": {
@@ -244,6 +294,11 @@ class AdminTools:
 
     def call(self, tool_name: str, arguments: dict, user_id: str = "system") -> Any:
         handlers = {
+            "ontology_create_workspace": self._create_workspace,
+            "ontology_delete_workspace": self._delete_workspace,
+            "ontology_list_workspaces": self._list_workspaces,
+            "ontology_switch_workspace": self._switch_workspace,
+            "ontology_get_current_workspace": self._get_current_workspace,
             "ontology_create_type": self._create_type,
             "ontology_update_type": self._update_type,
             "ontology_delete_type": self._delete_type,
@@ -267,6 +322,80 @@ class AdminTools:
         if not handler:
             raise KeyError(f"Unknown admin tool: {tool_name}")
         return handler(arguments)
+
+    # ── Workspace 管理 ───────────────────────────────────────────────────
+
+    def _create_workspace(self, args: dict) -> dict:
+        name = args["name"]
+        description = args.get("description", "")
+        result = self._schema_store.create_workspace(name, description)
+        if "error" not in result:
+            self._audit.log("system", "create_workspace", name)
+            # 同步在新 workspace 内创建 Workspace 实例（代表自身），
+            # 以便 Skill.belongsToWorkspace 等关系能被 traverse。
+            self._ensure_workspace_instance(name, description)
+        return result
+
+    def _ensure_workspace_instance(self, ws_name: str, description: str = "") -> None:
+        """确保指定 workspace 内存在一个同名的 Workspace 实例。
+
+        仅当当前本体定义了 Workspace 类型时才写入；失败不报错（不影响 workspace 创建）。
+        """
+        try:
+            if not self._schema_store.get_type("Workspace"):
+                return
+            pk = self._schema_store.get_primary_key("Workspace")
+            original_ws = self._store.get_workspace()
+            try:
+                self._store.set_workspace(ws_name)
+                if self._store.get("Workspace", ws_name) is None:
+                    self._store.create("Workspace", ws_name, {
+                        pk: ws_name,
+                        "name": ws_name,
+                        "description": description,
+                        "status": "active",
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                    })
+            finally:
+                self._store.set_workspace(original_ws)
+        except Exception:
+            pass
+
+    def _delete_workspace(self, args: dict) -> dict:
+        name = args["name"]
+        result = self._schema_store.delete_workspace(name)
+        if "error" not in result:
+            self._audit.log("system", "delete_workspace", name)
+        return result
+
+    def _list_workspaces(self, args: dict) -> dict:
+        workspaces = self._schema_store.list_workspaces()
+        current = self._schema_store.get_workspace()
+        return {
+            "workspaces": workspaces,
+            "current": current,
+            "count": len(workspaces),
+        }
+
+    def _switch_workspace(self, args: dict) -> dict:
+        name = args["name"]
+        # 验证 workspace 存在
+        info = self._schema_store.get_workspace_info(name)
+        if not info:
+            return {"error": f"Workspace '{name}' not found"}
+        # 切换 schema_store 和 store 的 workspace
+        self._schema_store.set_workspace(name)
+        self._store.set_workspace(name)
+        self._audit.log("system", "switch_workspace", name)
+        return {"status": "switched", "workspace": name}
+
+    def _get_current_workspace(self, args: dict) -> dict:
+        current = self._schema_store.get_workspace()
+        info = self._schema_store.get_workspace_info(current)
+        return {
+            "workspace": current,
+            "info": info,
+        }
 
     # ── Type 管理 ────────────────────────────────────────────────────────
 

@@ -102,6 +102,32 @@ class BusinessTools:
         except Exception as e:
             return {"error": f"Function execution failed: {e}"}
 
+    def _resolve_edits(self, action: dict, params: dict) -> dict:
+        """将 YAML edits 映射解析为实际要写入的 changes。
+
+        规则：
+        - 若 value 是字符串且命中 action.params 中声明的参数名 → 视为“参数引用”，
+          仅当用户实际传入该参数时才写入 changes，避免未传字段被清空为 None。
+        - 否则 → 视为“字面常量”（如 status: active / deprecated / archived），总是写入。
+        """
+        declared_params = set((action.get("params") or {}).keys())
+        edits = action.get("edits") or {}
+        changes: dict = {}
+        for field, ref in edits.items():
+            if isinstance(ref, str) and ref in declared_params:
+                if ref in params and params[ref] is not None:
+                    changes[field] = params[ref]
+                # 参数未传 → 跳过，保留原值
+            else:
+                changes[field] = ref
+        return changes
+
+    def _generate_id(self, target_type: str) -> str:
+        """生成实例 ID：优先用主键属性的 id_prefix，否则回退到 类型名前 3 位大写。"""
+        import uuid
+        prefix = self._schema_store.get_id_prefix(target_type)
+        return f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
+
     def _call_action(self, act_name: str, params: dict, user_id: str) -> Any:
         action = self._schema_store.get_action(act_name)
         if not action:
@@ -116,9 +142,8 @@ class BusinessTools:
             if action.get("creates"):
                 changes.append({"type": "create", "object_type": action["target_type"], "data": params})
             else:
-                edits = action.get("edits", {})
-                for field, param_key in edits.items():
-                    changes.append({"field": field, "to": params.get(param_key)})
+                for field, value in self._resolve_edits(action, params).items():
+                    changes.append({"field": field, "to": value})
             return {
                 "status": "pending_confirmation",
                 "action": act_name,
@@ -134,8 +159,7 @@ class BusinessTools:
                 pk = self._schema_store.get_primary_key(target_type)
                 data = dict(params)
                 if pk not in data:
-                    import uuid
-                    data[pk] = f"{target_type[:3].upper()}-{uuid.uuid4().hex[:6].upper()}"
+                    data[pk] = self._generate_id(target_type)
                 result = self._store.create(target_type, data[pk], data)
             else:
                 target_type = action["target_type"]
@@ -147,10 +171,9 @@ class BusinessTools:
                         break
                 if not target_id:
                     return {"error": "Cannot determine target object ID from params"}
-                changes = {}
-                edits = action.get("edits", {})
-                for field, param_key in edits.items():
-                    changes[field] = params.get(param_key)
+                changes = self._resolve_edits(action, params)
+                if not changes:
+                    return {"error": "No effective changes to apply (all edit fields missing from params)"}
                 result = self._store.update(target_type, target_id, changes)
 
             self._audit.log(user_id, "action", None, None,
