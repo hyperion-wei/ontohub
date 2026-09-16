@@ -559,6 +559,19 @@ class AdminTools:
         if not link_def:
             return [{"error": f"No link '{link_name}' on {object_type}"}]
 
+        # 反向遍历（一→多）：foreign_key 在 target 类型上，用当前实例的主键值去查
+        if link_def.get("reverse"):
+            source = self._store.get(object_type, object_id)
+            if source is None:
+                return []
+            source_pk = self._schema_store.get_primary_key(object_type)
+            pk_value = source.get(source_pk)
+            if pk_value is None:
+                return []
+            fk_field = link_def.get("foreign_key", "")
+            return self._store.query(link_def["target"], {fk_field: pk_value}, properties)
+
+        # 正向遍历（多→一）：foreign_key 在当前类型上
         target_pk = self._schema_store.get_primary_key(link_def["target"])
         return self._store.traverse(object_type, object_id, link_name, link_def, target_pk, properties)
 

@@ -17,7 +17,7 @@ from ontohub.dynamic_functions import DynamicFunctionRegistry
 from ontohub.tool_governance import ToolGovernance
 from ontohub.admin_tools import AdminTools
 from ontohub.business_tools import BusinessTools
-from ontohub.mcp_server import MCPServer
+from ontohub.mcp_server import MCPServer, MCP_INSTRUCTIONS
 
 
 DB_PATH = os.environ.get("ONTOHUB_DB", os.path.join(os.path.dirname(__file__), ".ontohub.db"))
@@ -302,27 +302,13 @@ async def mcp_sse(request: Request):
             }),
         }
         
-        # 发送初始化提示
-        instructions = f"""# Ontology Hub MCP Server
-
-欢迎！你是一个 AI Agent，已连接到 Ontology Hub。
-
-## 当前状态
-- Workspace: {current_workspace}
-- 可用工具: {len(all_tools)} 个
-- 对象类型: {len(types)} 个
-- Skill 数量: {skill_count} 个
-
-## 快速开始
-1. 调用 `ontology_get_schema` 了解本体结构
-2. 调用 `function:searchSkills` 或 `function:listSkillsByWorkspace` 查看可用的 Skill
-3. 根据 Skill 的 prompt 执行任务
-
-## 工具类型
-- `ontology_*`: Admin 工具（管理本体结构）
-- `function:*`: 查询函数（只读）
-- `action:*`: 操作（修改数据）
-"""
+        # 发送初始化提示（复用 mcp_server.MCP_INSTRUCTIONS，与 initialize 响应保持同一源）
+        instructions = MCP_INSTRUCTIONS.format(
+            workspace=current_workspace,
+            tool_count=len(all_tools),
+            type_count=len(types),
+            skill_count=skill_count,
+        )
         yield {
             "event": "instructions",
             "data": json.dumps({"instructions": instructions}, ensure_ascii=False),

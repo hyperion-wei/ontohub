@@ -1,7 +1,9 @@
 from __future__ import annotations
+import json as _json
 import re
 import signal
 import threading
+import urllib.request as _urllib_request
 from typing import Any, Callable
 
 from ontohub.core.store import ObjectStore
@@ -58,23 +60,29 @@ class DynamicFunctionRegistry:
         self._fn_meta: dict[str, dict] = {}
 
     def load_from_db(self) -> int:
-        """从 SQLite 加载所有已注册的 Function。"""
-        functions = self._schema_store.list_functions()
-        loaded = 0
-        for fn in functions:
-            if fn.get("code"):
-                try:
-                    self._compile_and_register(
-                        name=fn["name"],
-                        code=fn["code"],
-                        description=fn.get("description", ""),
-                        params=fn.get("params", {}),
-                        returns=fn.get("returns", ""),
-                    )
-                    loaded += 1
-                except Exception:
-                    pass  # 跳过编译失败的
-        return loaded
+        """从 SQLite 加载所有 workspace 的已注册 Function。"""
+        original_ws = self._schema_store.get_workspace()
+        total = 0
+        try:
+            for ws in self._schema_store.list_workspaces():
+                self._schema_store.set_workspace(ws["name"])
+                functions = self._schema_store.list_functions()
+                for fn in functions:
+                    if fn.get("code"):
+                        try:
+                            self._compile_and_register(
+                                name=fn["name"],
+                                code=fn["code"],
+                                description=fn.get("description", ""),
+                                params=fn.get("params", {}),
+                                returns=fn.get("returns", ""),
+                            )
+                            total += 1
+                        except Exception:
+                            pass  # 跳过编译失败的
+        finally:
+            self._schema_store.set_workspace(original_ws)
+        return total
 
     def register(self, name: str, code: str, description: str = "",
                  params: dict | None = None, returns: str = "") -> dict:
@@ -143,6 +151,8 @@ class DynamicFunctionRegistry:
             "__builtins__": safe_builtins,
             "store": self._store,
             "schema_store": self._schema_store,
+            "http_request": _urllib_request,
+            "json": _json,
         }
 
         # 包装代码为函数
