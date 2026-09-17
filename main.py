@@ -244,13 +244,50 @@ app.add_middleware(
 
 # ── MCP Endpoints ─────────────────────────────────────────────────────────
 
+def _authenticate_mcp_request(request: Request) -> tuple[dict | None, JSONResponse | None]:
+    """MCP 通道统一鉴权：验证 Bearer Token，返回 (identity, error_response)。"""
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None, JSONResponse(
+            status_code=401,
+            content={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32001, "message": "Unauthorized: missing 'Authorization: Bearer <token>' header"},
+            },
+        )
+    token = auth_header[7:].strip()
+    token_info = TokenStore(DB_PATH).validate_token(token)
+    if not token_info:
+        return None, JSONResponse(
+            status_code=401,
+            content={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32001, "message": "Unauthorized: invalid or expired token"},
+            },
+        )
+    identity = {
+        "workspace": token_info.get("workspace", "default"),
+        "role": token_info.get("role", "viewer"),
+        "tools": token_info.get("tools") or [],
+        "user_id": f"token:{token[:28]}",
+    }
+    return identity, None
+
+
 @app.post("/mcp/message")
 async def mcp_message(request: Request):
-    """MCP JSON-RPC 消息端点。"""
+    """MCP JSON-RPC 消息端点（强制 Token 鉴权，每个请求独立验证）。"""
+    # X-Workspace / X-Role 头不再作为信任来源，一律以 Token 验证结果为准
+    identity, err = _authenticate_mcp_request(request)
+    if err:
+        return err
+
     body = await request.json()
     session_id = request.headers.get("X-Session-Id") or request.query_params.get("session_id")
     mcp: MCPServer = request.app.state.mcp
-    result = mcp.handle_message(body, session_id)
+    result = mcp.handle_message(body, session_id, identity=identity)
     if result is None:
         return JSONResponse(content={}, status_code=202)
     return result
@@ -258,42 +295,58 @@ async def mcp_message(request: Request):
 
 @app.get("/mcp/sse")
 async def mcp_sse(request: Request):
-    """MCP SSE 长连接端点（用于工具发现和实时通知）。"""
+    """MCP SSE 长连接端点（强制 Token 鉴权，与 /mcp/message 同一信任链）。"""
     mcp: MCPServer = request.app.state.mcp
-    
-    # 获取请求头中的认证信息
-    auth_header = request.headers.get("authorization", "")
-    workspace = request.headers.get("x-workspace", "default")
-    role = request.headers.get("x-role", "admin")
-    
-    # 如果有 Authorization header，验证 token
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        token_store = TokenStore(DB_PATH)
-        token_info = token_store.validate_token(token)
-        if token_info:
-            workspace = token_info.get("workspace", workspace)
-            role = token_info.get("role", role)
-            # 切换 workspace
-            mcp._admin._schema_store.set_workspace(workspace)
-            mcp._admin._store.set_workspace(workspace)
 
-    async def event_stream():
-        # 获取当前状态
-        current_workspace = mcp._admin._schema_store.get_workspace()
-        all_tools = mcp._get_all_tools()
+    identity, err = _authenticate_mcp_request(request)
+    if err:
+        return err
+
+    workspace = identity["workspace"]
+    role = identity["role"]
+    token_tools = identity["tools"]
+
+    # 在 Token 绑定的 workspace 上下文中同步收集数据，然后恢复全局状态
+    # （不污染服务端全局 workspace，多 Token 并发互不干扰）
+    original = (
+        mcp._admin._schema_store.get_workspace(),
+        mcp._admin._store.get_workspace(),
+    )
+    switched = original != (workspace, workspace)
+    if switched:
+        mcp._admin._schema_store.set_workspace(workspace)
+        mcp._admin._store.set_workspace(workspace)
+    try:
         types = mcp._admin._schema_store.list_types()
         functions = mcp._admin._schema_store.list_functions()
         actions = mcp._admin._schema_store.list_actions()
-        
-        # 统计 Skill 数量
+        all_tools = mcp._get_all_tools()
+        # 按角色 + Token 级白名单过滤（与 tools/list 一致）
+        filtered_tools = mcp._governance.filter_tools_for_token(role, all_tools, token_tools)
         skill_count = 0
         try:
             skills = mcp._admin._store.query("Skill", None, None)
             skill_count = len(skills)
-        except:
+        except Exception:
             pass
-        
+    finally:
+        if switched:
+            mcp._admin._schema_store.set_workspace(original[0])
+            mcp._admin._store.set_workspace(original[1])
+
+    admin_count = sum(1 for t in filtered_tools if t["name"].startswith("ontology_"))
+    function_count = sum(1 for t in filtered_tools if t["name"].startswith("function:"))
+    action_count = sum(1 for t in filtered_tools if t["name"].startswith("action:"))
+
+    # 发送初始化提示（复用 mcp_server.MCP_INSTRUCTIONS，与 initialize 响应保持同一源）
+    instructions = MCP_INSTRUCTIONS.format(
+        workspace=workspace,
+        tool_count=len(filtered_tools),
+        type_count=len(types),
+        skill_count=skill_count,
+    )
+
+    async def event_stream():
         # 发送 endpoint 事件（MCP 协议要求）
         yield {
             "event": "endpoint",
@@ -301,33 +354,22 @@ async def mcp_sse(request: Request):
                 "endpoint": "/mcp/message",
             }),
         }
-        
-        # 发送初始化提示（复用 mcp_server.MCP_INSTRUCTIONS，与 initialize 响应保持同一源）
-        instructions = MCP_INSTRUCTIONS.format(
-            workspace=current_workspace,
-            tool_count=len(all_tools),
-            type_count=len(types),
-            skill_count=skill_count,
-        )
+
         yield {
             "event": "instructions",
             "data": json.dumps({"instructions": instructions}, ensure_ascii=False),
         }
-        
-        # 发送工具列表
-        admin_tools = [t for t in all_tools if t["name"].startswith("ontology_")]
-        function_tools = [t for t in all_tools if t["name"].startswith("function:")]
-        action_tools = [t for t in all_tools if t["name"].startswith("action:")]
-        
+
+        # 发送工具列表（已按 Token 过滤）
         yield {
             "event": "tools",
             "data": json.dumps({
-                "tools": all_tools,
+                "tools": filtered_tools,
                 "summary": {
-                    "total": len(all_tools),
-                    "admin": len(admin_tools),
-                    "function": len(function_tools),
-                    "action": len(action_tools),
+                    "total": len(filtered_tools),
+                    "admin": admin_count,
+                    "function": function_count,
+                    "action": action_count,
                 },
                 "hints": {
                     "admin": "ontology_* 工具用于管理本体结构",
@@ -336,18 +378,18 @@ async def mcp_sse(request: Request):
                 }
             }, ensure_ascii=False),
         }
-        
+
         # 发送本体结构概览
         yield {
             "event": "schema",
             "data": json.dumps({
-                "workspace": current_workspace,
+                "workspace": workspace,
                 "types": [{"name": t["name"], "description": t.get("description", "")} for t in types],
                 "functions": [{"name": f["name"], "description": f.get("description", "")} for f in functions],
                 "actions": [{"name": a["name"], "description": a.get("description", "")} for a in actions],
             }, ensure_ascii=False),
         }
-        
+
         # 保持连接（发送心跳）
         import asyncio
         while True:
@@ -387,7 +429,7 @@ async def call_tool(request: Request):
 
     try:
         if tool_name.startswith("ontology_"):
-            result = mcp._admin.call(tool_name, arguments, user_id)
+            result = mcp._admin.call(tool_name, arguments, user_id, role)
         elif tool_name.startswith("function:") or tool_name.startswith("action:"):
             result = mcp._business.call(tool_name, arguments, user_id)
         else:

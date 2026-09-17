@@ -19,6 +19,17 @@ _DEFAULT_CONFIG_DIR = os.environ.get(
 )
 _DEFAULT_ONTOLOGY_YAML = os.path.join(_DEFAULT_CONFIG_DIR, "skill_ontology.yaml")
 
+# 支持显式跨空间操作的工具（调用时可在顶层参数传 workspace，仅 admin 角色生效）。
+# 不含 workspace 管理类工具（create/delete/switch/list/get_current workspace）。
+_CROSS_WS_TOOLS = {
+    "ontology_create_type", "ontology_update_type", "ontology_delete_type",
+    "ontology_create_instance", "ontology_update_instance", "ontology_delete_instance",
+    "ontology_get_instance", "ontology_query_instances", "ontology_traverse",
+    "ontology_get_schema", "ontology_list_types", "ontology_get_graph",
+    "ontology_register_function", "ontology_unregister_function",
+    "ontology_register_action", "ontology_unregister_action",
+}
+
 
 class AdminTools:
     """本体管理工具集 — 15 个 Admin Tool 的实现。"""
@@ -40,7 +51,7 @@ class AdminTools:
     # ── 工具定义（MCP Tool Schema） ──────────────────────────────────────
 
     def get_tool_definitions(self) -> list[dict]:
-        return [
+        tools = [
             {
                 "name": "ontology_create_workspace",
                 "description": "创建新的工作空间（可选择空白或从模板初始化）",
@@ -248,6 +259,34 @@ class AdminTools:
                 },
             },
             {
+                "name": "ontology_register_action",
+                "description": "注册新的 Action（数据变更操作定义），注册后自动暴露为 action:<name> 工具",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Action 名称（暴露为 action:<name>）"},
+                        "description": {"type": "string", "description": "Action 说明"},
+                        "params": {"type": "object", "description": "参数签名 {参数名: {type, required, values, description}}"},
+                        "target_type": {"type": "string", "description": "目标对象类型（如 Skill / ApiKey / Endpoint）"},
+                        "edits": {"type": "object", "description": "字段编辑映射 {字段: 参数名或字面量}；creates=true 时忽略"},
+                        "creates": {"type": "boolean", "description": "true=创建新实例，false=更新已有实例", "default": False},
+                        "requires_confirmation": {"type": "boolean", "description": "高危操作门禁：需 confirmed=true 才执行", "default": False},
+                    },
+                    "required": ["name", "target_type"],
+                },
+            },
+            {
+                "name": "ontology_unregister_action",
+                "description": "注销 Action（已注册的同名 action 定义将被删除）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Action 名称"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "ontology_get_schema",
                 "description": "获取本体完整定义（类型、关系、函数、操作）",
                 "inputSchema": {
@@ -305,9 +344,19 @@ class AdminTools:
             },
         ]
 
+        # 为支持跨空间的工具统一附加 workspace 参数（仅 admin 角色可跨 Token 绑定空间操作）
+        ws_prop = {
+            "type": "string",
+            "description": "目标工作空间（可选；仅 admin 角色可跨空间，非 admin 传入将被拒绝）",
+        }
+        for t in tools:
+            if t["name"] in _CROSS_WS_TOOLS:
+                t["inputSchema"]["properties"]["workspace"] = dict(ws_prop)
+        return tools
+
     # ── 工具调用路由 ─────────────────────────────────────────────────────
 
-    def call(self, tool_name: str, arguments: dict, user_id: str = "system") -> Any:
+    def call(self, tool_name: str, arguments: dict, user_id: str = "system", role: str = "admin") -> Any:
         handlers = {
             "ontology_create_workspace": self._create_workspace,
             "ontology_delete_workspace": self._delete_workspace,
@@ -326,6 +375,8 @@ class AdminTools:
             "ontology_register_function": self._register_function,
             "ontology_unregister_function": self._unregister_function,
             "ontology_list_functions": self._list_functions,
+            "ontology_register_action": self._register_action,
+            "ontology_unregister_action": self._unregister_action,
             "ontology_get_schema": self._get_schema,
             "ontology_list_types": self._list_types,
             "ontology_get_graph": self._get_graph,
@@ -336,6 +387,28 @@ class AdminTools:
         handler = handlers.get(tool_name)
         if not handler:
             raise KeyError(f"Unknown admin tool: {tool_name}")
+
+        # 显式跨空间操作：顶层 workspace 参数仅在 admin 角色且工具支持时生效。
+        # 注：与实例自身的业务字段不冲突（如 Skill.workspace 在 data 内部，不在此层）。
+        target_ws = arguments.get("workspace")
+        if target_ws is not None:
+            if tool_name not in _CROSS_WS_TOOLS:
+                return {"error": f"Tool '{tool_name}' does not support cross-workspace parameter"}
+            if role != "admin":
+                return {"error": "Permission denied: cross-workspace operations require admin role"}
+            args = {k: v for k, v in arguments.items() if k != "workspace"}
+            if target_ws == self._schema_store.get_workspace():
+                return handler(args)
+            original_schema_ws = self._schema_store.get_workspace()
+            original_store_ws = self._store.get_workspace()
+            self._schema_store.set_workspace(target_ws)
+            self._store.set_workspace(target_ws)
+            try:
+                return handler(args)
+            finally:
+                self._schema_store.set_workspace(original_schema_ws)
+                self._store.set_workspace(original_store_ws)
+
         return handler(arguments)
 
     # ── Workspace 管理 ───────────────────────────────────────────────────
@@ -597,6 +670,34 @@ class AdminTools:
 
     def _list_functions(self, args: dict) -> list[dict]:
         return self._functions.list_functions()
+
+    # ── Action 注册 ────────────────────────────────────────────────────
+
+    def _register_action(self, args: dict) -> dict:
+        name = args["name"]
+        target_type = args.get("target_type", "")
+        if not target_type:
+            return {"error": "target_type is required"}
+        # 目标类型必须已存在，避免注册出悬空 action
+        if not self._schema_store.get_type(target_type):
+            return {"error": f"Target type '{target_type}' not found"}
+        self._schema_store.save_action(
+            name=name,
+            description=args.get("description", ""),
+            params=args.get("params", {}),
+            target_type=target_type,
+            edits=args.get("edits", {}),
+            creates=args.get("creates", False),
+            requires_confirmation=args.get("requires_confirmation", False),
+        )
+        self._audit.log("system", "register_action", name)
+        return {"status": "registered", "name": name, "exposed_as": f"action:{name}"}
+
+    def _unregister_action(self, args: dict) -> dict:
+        removed = self._schema_store.delete_action(args["name"])
+        if removed:
+            self._audit.log("system", "unregister_action", args["name"])
+        return {"status": "unregistered" if removed else "not_found", "name": args["name"]}
 
     # ── Schema 查询 ──────────────────────────────────────────────────────
 

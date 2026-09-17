@@ -194,7 +194,7 @@ npm run dev
 | `function:*` | Function | 只读查询函数 |
 | `action:*` | Action | 数据变更操作 |
 
-### Admin Tools（23个）
+### Admin Tools（25个）
 
 | 工具 | 说明 |
 |------|------|
@@ -202,6 +202,7 @@ npm run dev
 | `ontology_delete_workspace` | 删除工作空间 |
 | `ontology_list_workspaces` | 列出所有工作空间 |
 | `ontology_switch_workspace` | 切换工作空间 |
+| `ontology_get_current_workspace` | 获取当前工作空间 |
 | `ontology_create_type` | 创建对象类型 |
 | `ontology_update_type` | 更新对象类型 |
 | `ontology_delete_type` | 删除对象类型 |
@@ -214,6 +215,8 @@ npm run dev
 | `ontology_register_function` | 注册函数 |
 | `ontology_unregister_function` | 注销函数 |
 | `ontology_list_functions` | 列出函数 |
+| `ontology_register_action` | 注册 Action（自动暴露为 action:* 工具） |
+| `ontology_unregister_action` | 注销 Action |
 | `ontology_get_schema` | 获取本体结构 |
 | `ontology_list_types` | 列出类型 |
 | `ontology_get_graph` | 获取图数据 |
@@ -231,7 +234,7 @@ npm run dev
 | `function:getSkillExecutionHistory` | 获取 Skill 执行历史 |
 | `function:findSkillByTrigger` | 根据触发条件查找 Skill |
 
-### Actions（7个）
+### Actions（5个，默认模板）
 
 | 操作 | 说明 |
 |------|------|
@@ -239,9 +242,9 @@ npm run dev
 | `action:updateSkill` | 更新 Skill |
 | `action:deleteSkill` | 删除 Skill |
 | `action:activateSkill` | 激活 Skill |
-| `action:createWorkspace` | 创建工作空间 |
-| `action:archiveWorkspace` | 归档工作空间 |
 | `action:recordExecution` | 记录执行结果 |
+
+> **治理约定**：Workspace 的创建/删除属于基础设施管理，由 Admin Tool `ontology_create_workspace` / `ontology_delete_workspace` 承担，不作为业务 Action 暴露。各空间可通过 `ontology_register_action` 按需注册领域运维 Action（如 llm 空间的 `revokeApiKey`、`rotateApiKey` 相关操作）。
 
 ## 使用示例
 

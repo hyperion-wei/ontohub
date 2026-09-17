@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import threading
 import uuid
 from typing import Any
 
@@ -123,7 +124,7 @@ Function 与 Action 全部作为 MCP Tool 对外暴露；本体 schema 修改与
 
 1. **权限控制**：Token 决定可见的工具集合，越权调用会返回 `Permission denied`
 2. **确认机制**：`requires_confirmation=true` 的 Action 必须显式传入 `confirmed=true` 才会执行
-3. **Workspace 隔离**：所有查询与变更都限定在当前 Workspace，切换前先确认目标空间
+3. **Workspace 隔离**：操作默认限定在 Token 绑定的 Workspace；admin 角色可在支持的工具参数中显式传 `workspace` 定向操作其他空间，非 admin 传入将被拒绝
 4. **审计日志**：所有工具调用都会落审计表，可回溯
 5. **Admin Tool 慎用**：`ontology_*` 会改变本体结构本身，运行期 Agent 不应调用；建设期使用后建议回收 Token
 
@@ -149,31 +150,60 @@ class MCPServer:
         self._business = business_tools
         self._governance = governance
         self._sessions: dict[str, dict] = {}
+        # 串行化请求处理：保证「切换 workspace → 处理 → 恢复」的原子性，
+        # 避免多 Token 并发请求时存储层上下文互相踩踏
+        self._request_lock = threading.Lock()
 
     # ── MCP 协议处理 ─────────────────────────────────────────────────────
 
-    def handle_message(self, message: dict, session_id: str | None = None) -> dict:
-        """处理 MCP JSON-RPC 消息。"""
+    def handle_message(
+        self, message: dict, session_id: str | None = None, identity: dict | None = None
+    ) -> dict:
+        """处理 MCP JSON-RPC 消息。
+
+        identity 为 HTTP 层通过 Token 验证得到的请求级身份：
+        {"workspace": str, "role": str, "tools": list[str], "user_id": str}。
+        角色 / workspace / 工具白名单一律以 identity 为准，
+        不信任 initialize params 中的客户端声明。
+        """
         method = message.get("method", "")
         msg_id = message.get("id")
         params = message.get("params", {})
 
-        if method == "initialize":
-            return self._handle_initialize(msg_id, params, session_id)
-        elif method == "tools/list":
-            return self._handle_tools_list(msg_id, session_id)
-        elif method == "tools/call":
-            return self._handle_tools_call(msg_id, params, session_id)
-        elif method == "notifications/initialized":
+        if method == "notifications/initialized":
             return None  # 无需响应
-        else:
-            return self._error(msg_id, -32601, f"Method not found: {method}")
 
-    def _handle_initialize(self, msg_id: Any, params: dict, session_id: str | None) -> dict:
+        with self._request_lock:
+            restore = self._enter_workspace(identity)
+            try:
+                if method == "initialize":
+                    return self._handle_initialize(msg_id, params, session_id, identity)
+                elif method == "tools/list":
+                    return self._handle_tools_list(msg_id, session_id, identity)
+                elif method == "tools/call":
+                    return self._handle_tools_call(msg_id, params, session_id, identity)
+                else:
+                    return self._error(msg_id, -32601, f"Method not found: {method}")
+            finally:
+                self._exit_workspace(restore)
+
+    def _handle_initialize(
+        self, msg_id: Any, params: dict, session_id: str | None, identity: dict | None = None
+    ) -> dict:
+        # 身份一律取 Token 验证结果；仅内部直连（无 identity）时才回退到 params
+        if identity:
+            role = identity.get("role", "viewer")
+            user_id = identity.get("user_id", "unknown")
+        else:
+            role = params.get("role", "admin")
+            user_id = params.get("user_id", "anonymous")
+
         sid = session_id or str(uuid.uuid4())
         self._sessions[sid] = {
-            "role": params.get("role", "admin"),
-            "user_id": params.get("user_id", "anonymous"),
+            "role": role,
+            "user_id": user_id,
+            "workspace": (identity or {}).get("workspace"),
+            "token_tools": (identity or {}).get("tools"),
             "initialized": True,
         }
         
@@ -212,10 +242,10 @@ class MCPServer:
             "instructions": instructions,
         })
 
-    def _handle_tools_list(self, msg_id: Any, session_id: str | None) -> dict:
-        role = self._get_role(session_id)
+    def _handle_tools_list(self, msg_id: Any, session_id: str | None, identity: dict | None = None) -> dict:
+        role, token_tools = self._resolve_identity(session_id, identity)
         all_tools = self._get_all_tools()
-        filtered = self._governance.filter_tools(role, all_tools)
+        filtered = self._governance.filter_tools_for_token(role, all_tools, token_tools)
         
         # 按类型分组工具
         admin_tools = [t for t in filtered if t["name"].startswith("ontology_")]
@@ -237,20 +267,22 @@ class MCPServer:
             }
         })
 
-    def _handle_tools_call(self, msg_id: Any, params: dict, session_id: str | None) -> dict:
+    def _handle_tools_call(
+        self, msg_id: Any, params: dict, session_id: str | None, identity: dict | None = None
+    ) -> dict:
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
-        role = self._get_role(session_id)
-        user_id = self._get_user_id(session_id)
+        role, token_tools = self._resolve_identity(session_id, identity)
+        user_id = self._resolve_user_id(session_id, identity)
 
-        # 权限检查
-        if not self._governance.can_use_tool(role, tool_name):
+        # 权限检查（角色 + Token 级白名单）
+        if not self._governance.can_use_tool_for_token(role, tool_name, token_tools):
             return self._error(msg_id, -32600, f"Permission denied: role '{role}' cannot use tool '{tool_name}'")
 
-        # 路由到对应的工具集
+        # 路由到对应的工具集（role 透传给 admin 工具，用于跨空间参数鉴权）
         try:
             if tool_name.startswith("ontology_"):
-                result = self._admin.call(tool_name, arguments, user_id)
+                result = self._admin.call(tool_name, arguments, user_id, role)
             elif tool_name.startswith("function:") or tool_name.startswith("action:"):
                 result = self._business.call(tool_name, arguments, user_id)
             else:
@@ -282,15 +314,49 @@ class MCPServer:
 
     # ── 会话管理 ─────────────────────────────────────────────────────────
 
-    def _get_role(self, session_id: str | None) -> str:
-        if not session_id or session_id not in self._sessions:
-            return "admin"  # 默认 admin（无会话时）
-        return self._sessions[session_id].get("role", "admin")
+    # 身份解析（Token 优先，不信任客户端声明）
 
-    def _get_user_id(self, session_id: str | None) -> str:
-        if not session_id or session_id not in self._sessions:
-            return "system"
-        return self._sessions[session_id].get("user_id", "system")
+    def _resolve_identity(
+        self, session_id: str | None, identity: dict | None
+    ) -> tuple[str, list[str]]:
+        """解析 (role, token_tools)。请求级 identity > 会话记录；无任何身份时降级 viewer。"""
+        if identity:
+            return identity.get("role", "viewer"), identity.get("tools") or []
+        sess = self._sessions.get(session_id or "")
+        if sess:
+            return sess.get("role", "viewer"), sess.get("token_tools") or []
+        return "viewer", []
+
+    def _resolve_user_id(self, session_id: str | None, identity: dict | None) -> str:
+        if identity:
+            return identity.get("user_id", "unknown")
+        sess = self._sessions.get(session_id or "")
+        if sess:
+            return sess.get("user_id", "system")
+        return "system"
+
+    # workspace 请求级上下文（Token 绑定，临时切换）
+
+    def _enter_workspace(self, identity: dict | None) -> tuple[str, str] | None:
+        """按 Token 绑定的 workspace 临时切换存储层上下文，返回待恢复的原值。"""
+        target = (identity or {}).get("workspace")
+        if not target:
+            return None
+        original = (
+            self._admin._schema_store.get_workspace(),
+            self._admin._store.get_workspace(),
+        )
+        if original != (target, target):
+            self._admin._schema_store.set_workspace(target)
+            self._admin._store.set_workspace(target)
+        return original
+
+    def _exit_workspace(self, restore: tuple[str, str] | None) -> None:
+        """恢复 _enter_workspace 之前的存储层上下文。"""
+        if not restore:
+            return
+        self._admin._schema_store.set_workspace(restore[0])
+        self._admin._store.set_workspace(restore[1])
 
     # ── JSON-RPC 辅助 ────────────────────────────────────────────────────
 

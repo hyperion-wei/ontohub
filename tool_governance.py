@@ -10,6 +10,7 @@ DEFAULT_ROLES: dict[str, dict] = {
     },
     "operator": {
         "tools": [
+            # 查询
             "ontology_get_instance",
             "ontology_query_instances",
             "ontology_traverse",
@@ -17,10 +18,15 @@ DEFAULT_ROLES: dict[str, dict] = {
             "ontology_list_types",
             "ontology_get_graph",
             "ontology_list_functions",
+            # 实例 CRUD（运行期 Agent 维护数据，如 LLM 资产；schema/workspace 管理仍需 admin）
+            "ontology_create_instance",
+            "ontology_update_instance",
+            "ontology_delete_instance",
+            # 业务工具
             "function:*",
             "action:*",
         ],
-        "description": "操作员，可查询数据和调用业务函数/操作",
+        "description": "操作员，可查询、增删改实例，调用业务函数/操作；不能改本体 schema 和 workspace",
     },
     "viewer": {
         "tools": [
@@ -56,6 +62,30 @@ class ToolGovernance:
 
     def filter_tools(self, role: str, all_tools: list[dict]) -> list[dict]:
         return [t for t in all_tools if self.can_use_tool(role, t.get("name", ""))]
+
+    def filter_tools_for_token(
+        self, role: str, all_tools: list[dict], token_tools: list[str] | None
+    ) -> list[dict]:
+        """角色过滤 + Token 级白名单二次过滤。
+
+        token_tools 为空列表/None 时表示使用角色默认权限（与 TokenStore 语义一致）；
+        非空时严格限定为「角色允许 ∩ 白名单」。
+        """
+        filtered = self.filter_tools(role, all_tools)
+        if token_tools:
+            allowed = set(token_tools)
+            filtered = [t for t in filtered if t.get("name", "") in allowed]
+        return filtered
+
+    def can_use_tool_for_token(
+        self, role: str, tool_name: str, token_tools: list[str] | None
+    ) -> bool:
+        """调用期校验：角色权限 + Token 级白名单同时满足才放行。"""
+        if not self.can_use_tool(role, tool_name):
+            return False
+        if token_tools and tool_name not in set(token_tools):
+            return False
+        return True
 
     def assign_tools(self, role: str, tools: list[str]) -> None:
         if role not in self._roles:

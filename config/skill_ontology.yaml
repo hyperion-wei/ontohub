@@ -175,22 +175,9 @@ actions:
     edits: { status: active }
     requires_confirmation: false
 
-  createWorkspace:
-    description: "创建工作空间"
-    params:
-      name: { type: string, required: true }
-      description: { type: string, required: false }
-    target_type: Workspace
-    creates: true
-    requires_confirmation: false
-
-  archiveWorkspace:
-    description: "归档工作空间"
-    params:
-      workspaceId: { type: string, required: true }
-    target_type: Workspace
-    edits: { status: archived }
-    requires_confirmation: true
+  # 说明：Workspace 的创建/归档属于基础设施管理，由 Admin Tool
+  # ontology_create_workspace / ontology_delete_workspace 承担，
+  # 不作为业务 Action 暴露（历史遗留的 createWorkspace/archiveWorkspace 已移除）
 
   recordExecution:
     description: "记录 Skill 执行结果"
